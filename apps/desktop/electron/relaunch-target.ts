@@ -130,9 +130,13 @@ export function canRelaunch(
 }
 
 // The helper starts before the caller's shutdown wait and execs the target
-// once its stdin reaches EOF: that pipe's only writer is this process, so EOF
-// is this process's exit, crash or kill, after which the target replaces the
-// helper as Electron's relauncher would.
+// once this process is gone, as Electron's relauncher would. EOF on its stdin
+// (this process is that pipe's only writer) only means Node's teardown began:
+// Chromium can still hold the DevTools port, storage locks and the GPU for
+// seconds, longer if it dumps core. The helper then waits until the kernel
+// reparents it, which happens after the dead process released its files. A
+// stuck old process holds the restart back for 600 polls (~30 s) at most, and
+// without /proc the read fails and the target starts at EOF.
 //
 // libuv's spawn keeps every descriptor this process inherited without
 // O_CLOEXEC, which Chromium's launcher (app.relaunch) closes. Ours include the
@@ -143,6 +147,11 @@ export function canRelaunch(
 // 0-9 and dash exits on `exec 10<&-`, so higher numbers are closed where the
 // shell takes them (bash, busybox) and left in place under dash.
 const EXEC_AFTER_EXIT = `while read -r _; do :; done
+n=0
+while [ $n -lt 600 ] && read -r _ _ _ cur _ </proc/self/stat && [ "$cur" = "$pp" ]; do
+  sleep 0.05
+  n=$((n + 1))
+done
 exec </dev/null
 big=
 (eval 'exec 10<&-') 2>/dev/null && big=1
@@ -208,7 +217,8 @@ export function spawnRelaunch(target: string, args: string[], env: NodeJS.Proces
     )
   }
 
-  const child = spawn(shell.file, [...shell.args, '-c', EXEC_AFTER_EXIT, target, ...args], {
+  // This pid, not the shell's $PPID: if this process dies before the shell starts, $PPID is already the new parent.
+  const child = spawn(shell.file, [...shell.args, '-c', `pp=${process.pid}\n${EXEC_AFTER_EXIT}`, target, ...args], {
     detached: true,
     stdio: ['pipe', 'ignore', 'ignore'],
     env: withoutMountEntries(env)

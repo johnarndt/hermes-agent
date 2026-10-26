@@ -37,10 +37,12 @@ export interface AppRelauncher {
  * FUSE-mounted AppImage cannot mount itself again. Linux therefore hands the
  * relaunch to an ordinary detached helper the moment it is requested, as
  * app.relaunch() does, so a fatal abort during the backend-shutdown wait still
- * comes back; the helper starts the target only once this process is gone, so
- * the new process neither races the old backend nor quits as a second
- * instance. The target is the AppImage file for a mounted image (the mount
- * dies with this process), otherwise this executable.
+ * comes back. The helper starts the target once this process has died, not
+ * when Node's teardown closes its stdin (Chromium's shutdown, or a core dump,
+ * can outlast that by seconds), so the new process neither races the old
+ * backend, DevTools port or storage locks nor quits as a second instance. The
+ * target is the AppImage file for a mounted image (the mount dies with this
+ * process), otherwise this executable.
  */
 export function createAppRelauncher(
   app: AppRelauncher,
@@ -70,7 +72,8 @@ export function createAppRelauncher(
       // not the long one main.ts restored after the lock (linux-sandbox-relaunch.ts).
       const childEnv = { ...env }
       restoreLaunchTmpdir(childEnv)
-      // The latest request wins.
+      // The latest request wins. The cancel relies on the old helper's stdin staying open until the
+      // SIGTERM lands: closing it first would let that helper exec, starting two targets.
       helper?.kill()
       helper = null
 

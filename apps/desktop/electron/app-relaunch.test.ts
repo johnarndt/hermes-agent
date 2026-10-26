@@ -111,6 +111,48 @@ test.skipIf(process.platform !== 'linux')(
   }
 )
 
+// Node's teardown closes the helper's stdin before Chromium has shut down (storage flush,
+// DevTools, a core dump): a target started then binds next to a live old process and loses
+// whatever that still holds, such as the DevTools port.
+const LINGERING_PROCESS = `
+import { spawnRelaunch } from './relaunch-target'
+
+process.env.OLD_PID = String(process.pid)
+spawnRelaunch(process.argv[2], [], process.env).stdin!.end()
+setTimeout(() => process.exit(0), 1000)
+`
+
+test.skipIf(process.platform !== 'linux')('a Linux relaunch starts only once the old process is dead', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'hermes-relaunch-linger-'))
+  const exe = path.join(dir, 'hermes')
+  const oldProcess = path.join(dir, 'old-process.cjs')
+  const report = path.join(dir, 'report')
+
+  fs.writeFileSync(
+    exe,
+    `#!/bin/sh\ns=$(cut -d' ' -f3 /proc/$OLD_PID/stat 2>/dev/null)\necho "\${s:-gone}" > "$REPORT.part"\nmv "$REPORT.part" "$REPORT"\n`,
+    { mode: 0o755 }
+  )
+  buildSync({
+    stdin: { contents: LINGERING_PROCESS, resolveDir: import.meta.dirname, loader: 'ts' },
+    outfile: oldProcess,
+    bundle: true,
+    platform: 'node',
+    format: 'cjs',
+    external: ['electron'],
+    logLevel: 'silent'
+  })
+
+  try {
+    spawnSync(process.execPath, [oldProcess, exe], { env: { PATH: process.env.PATH, REPORT: report } })
+    await vi.waitFor(() => expect(fs.existsSync(report)).toBe(true), { timeout: 5000 })
+    // Dead: reaped already, or a zombie its parent has not collected yet.
+    expect(['gone', 'Z']).toContain(fs.readFileSync(report, 'utf8').trim())
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})
+
 test('macOS and Windows keep Electron app.relaunch', () => {
   for (const platform of ['darwin', 'win32']) {
     const events: string[] = []

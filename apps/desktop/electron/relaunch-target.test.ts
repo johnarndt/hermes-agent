@@ -42,6 +42,10 @@ describe('ownAppImage', () => {
   })
 })
 
+// The helper waits while it is still this process's child and this runner stays, so a shell that
+// starts the helper in the background (stdin kept: an async list's is /dev/null) and exits stands in.
+const EXITING_PARENT = 'exec 4<&0; "$@" <&4 4<&- &'
+
 describe('spawnRelaunch', () => {
   // Chromium's relauncher closes inherited fds; a libuv spawn does not. The
   // AppImage runtime's keepalive pipe (fd 3) in the new image kept the old
@@ -88,10 +92,10 @@ describe('spawnRelaunch', () => {
         // Node marks every inherited fd close-on-exec at startup and Electron's
         // main does not, so the command spawnRelaunch spawns runs from a shell
         // that holds fds 3 and 9 open on a marker file, as Electron holds the
-        // runtime's keepalive pipe.
+        // runtime's keepalive pipe. That shell exits at once, as the app would.
         const realSpawn = (await vi.importActual<typeof childProcess>('node:child_process')).spawn
         vi.mocked(spawn).mockImplementationOnce((file, args, options) =>
-          realSpawn('/bin/sh', ['-c', 'exec 3<"$0" 9<"$0"; exec "$@"', held, file, ...args], options)
+          realSpawn('/bin/sh', ['-c', `exec 3<"$0" 9<"$0"; ${EXITING_PARENT}`, held, file, ...args], options)
         )
         fs.writeFileSync(held, '')
         // This mount's AppRun prepended it to PATH; the mount is gone soon after the child starts.
@@ -139,7 +143,10 @@ describe('spawnRelaunch', () => {
       // Electron's main keeps such fds across exec; Node marks its own close-on-exec, so hand one down as fd 12.
       const realSpawn = (await vi.importActual<typeof childProcess>('node:child_process')).spawn
       vi.mocked(spawn).mockImplementationOnce((file, args, options) =>
-        realSpawn(file, args, { ...options, stdio: ['pipe', ...Array<'ignore'>(11).fill('ignore'), fd] })
+        realSpawn('/bin/sh', ['-c', EXITING_PARENT, 'sh', file, ...args], {
+          ...options,
+          stdio: ['pipe', ...Array<'ignore'>(11).fill('ignore'), fd]
+        })
       )
 
       spawnRelaunch(exe, [], { PATH: process.env.PATH }).stdin!.end()

@@ -233,6 +233,12 @@ describe('Linux runtime --no-sandbox relaunch', () => {
           'linux'
         )
 
+        // The helper waits while it is still this process's child; a shell that starts it in the
+        // background (in a session of its own, as the detached spawn gives it) and exits stands in.
+        const realSpawn = (await vi.importActual<typeof childProcess>('node:child_process')).spawn
+        vi.mocked(spawn).mockImplementationOnce((file, args, options) =>
+          realSpawn('/bin/sh', ['-c', 'exec 4<&0; setsid "$@" <&4 4<&- &', 'sh', file, ...args], options)
+        )
         relaunchIfNoSandboxCameTooLate(relauncher, () => events.push('beforeExit'))
         expect(events).toEqual(['beforeExit', 'release', 'exit 0'])
         // This process is gone: the waiting helper's stdin closes.
