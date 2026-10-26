@@ -6,7 +6,7 @@ import path from 'node:path'
 
 import { describe, expect, it, vi } from 'vitest'
 
-import { ownAppImage, relaunchNow } from './relaunch-target'
+import { ownAppImage, spawnRelaunch } from './relaunch-target'
 
 vi.mock('node:child_process', async importOriginal => {
   const actual = await importOriginal<typeof childProcess>()
@@ -42,13 +42,13 @@ describe('ownAppImage', () => {
   })
 })
 
-describe('relaunchNow', () => {
+describe('spawnRelaunch', () => {
   // Chromium's relauncher closes inherited fds; a libuv spawn does not. The
   // AppImage runtime's keepalive pipe (fd 3) in the new image kept the old
   // mount and its squashfuse daemon alive for the new app's whole life; once
   // it is closed, the new image must not look anything up through that mount.
-  // A spawn error arrives after the caller exited, so an image that cannot run
-  // must keep this instance, its lock and its env instead.
+  // A spawn error can arrive after the caller exited, so an image that cannot
+  // run must keep this instance, its lock and its env instead.
   it.skipIf(process.platform !== 'linux')(
     'starts the image free of this mount, and stays put when it cannot',
     async () => {
@@ -71,7 +71,7 @@ describe('relaunchNow', () => {
           relaunchIfNoSandboxCameTooLate(
             {
               commandLine: { hasSwitch: name => name === 'no-sandbox' },
-              releaseSingleInstanceLock: () => events.push('release'),
+              relaunch: () => events.push('relaunch'),
               exit: () => events.push('exit')
             },
             () => events.push('beforeExit')
@@ -86,7 +86,7 @@ describe('relaunchNow', () => {
           { mode: 0o755 }
         )
         // Node marks every inherited fd close-on-exec at startup and Electron's
-        // main does not, so the command relaunchNow spawns runs from a shell
+        // main does not, so the command spawnRelaunch spawns runs from a shell
         // that holds fds 3 and 9 open on a marker file, as Electron holds the
         // runtime's keepalive pipe.
         const realSpawn = (await vi.importActual<typeof childProcess>('node:child_process')).spawn
@@ -96,15 +96,16 @@ describe('relaunchNow', () => {
         fs.writeFileSync(held, '')
         // This mount's AppRun prepended it to PATH; the mount is gone soon after the child starts.
         const mount = path.join(dir, '.mount_HermesQ7x2Lp')
-        relaunchNow(
-          { releaseSingleInstanceLock: () => events.push('release') },
-          [],
-          image,
-          { ...process.env, APPDIR: mount, PATH: `${mount}:${mount}/usr/sbin:/usr/bin:/bin` }
-        )
 
+        const helper = spawnRelaunch(image, [], {
+          ...process.env,
+          APPDIR: mount,
+          PATH: `${mount}:${mount}/usr/sbin:/usr/bin:/bin`
+        })
+
+        // The helper's stdin closes when this process is gone.
+        helper.stdin!.end()
         await vi.waitFor(() => expect(fs.existsSync(report)).toBe(true), { timeout: 5000 })
-        expect(events).toEqual(['release'])
         const [childPath, ...fds] = fs.readFileSync(report, 'utf8').split('\n')
         expect(childPath).toBe('/usr/bin:/bin')
         expect(fds.join('\n')).not.toContain(held)
@@ -138,12 +139,10 @@ describe('relaunchNow', () => {
       // Electron's main keeps such fds across exec; Node marks its own close-on-exec, so hand one down as fd 12.
       const realSpawn = (await vi.importActual<typeof childProcess>('node:child_process')).spawn
       vi.mocked(spawn).mockImplementationOnce((file, args, options) =>
-        realSpawn(file, args, { ...options, stdio: [...Array<'ignore'>(12).fill('ignore'), fd] })
+        realSpawn(file, args, { ...options, stdio: ['pipe', ...Array<'ignore'>(11).fill('ignore'), fd] })
       )
 
-      relaunchNow({ releaseSingleInstanceLock: () => {} }, [], exe, {
-        PATH: process.env.PATH
-      })
+      spawnRelaunch(exe, [], { PATH: process.env.PATH }).stdin!.end()
 
       await vi.waitFor(() => expect(fs.existsSync(report)).toBe(true), { timeout: 5000 })
       expect(fs.readFileSync(report, 'utf8')).not.toContain(held)
