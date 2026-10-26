@@ -81,3 +81,30 @@ test('macOS and Windows keep Electron app.relaunch', () => {
     expect(events).toEqual(['relaunch --no-sandbox', 'exit 0'])
   }
 })
+
+// The exit path runs after the backend is down: a target that cannot start falls back to
+// Electron's relauncher. JS keeps running briefly after app.exit(), and a relaunch requested
+// then (a second Restart) must not start another process.
+test.skipIf(process.platform !== 'linux')('a Linux relaunch whose target cannot start uses Electron, once', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'hermes-relaunch-noexec-'))
+  const exe = path.join(dir, 'hermes')
+  const events: string[] = []
+  const logged = vi.spyOn(console, 'error').mockImplementation(() => {})
+
+  fs.writeFileSync(exe, '', { mode: 0o644 })
+
+  try {
+    const relauncher = createAppRelauncher(recordingApp(events), 'linux', exe, { PATH: process.env.PATH })
+
+    relaunchApp(relauncher, { args: ['--disable-gpu'] }, {})
+    relauncher.exit(0)
+    relaunchApp(relauncher, { args: ['--no-sandbox'] }, {})
+    relauncher.exit(0)
+
+    expect(events).toEqual(['relaunch --disable-gpu', 'exit 0', 'exit 0'])
+    expect(logged).toHaveBeenCalledTimes(1)
+  } finally {
+    logged.mockRestore()
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})

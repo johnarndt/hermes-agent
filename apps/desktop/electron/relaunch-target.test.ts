@@ -120,4 +120,36 @@ describe('relaunchNow', () => {
       }
     }
   )
+
+  // After `ready` Chromium holds dozens of fds above 9 without O_CLOEXEC
+  // (crashpad client socket, DevTools listener, caches); dash, Debian's
+  // /bin/sh, cannot close them, and each relaunch carried the last one's.
+  it.skipIf(process.platform !== 'linux')('starts the target without an fd above 9 this process holds', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'hermes-relaunch-high-fd-'))
+    const exe = path.join(dir, 'hermes')
+    const report = path.join(dir, 'fds')
+    const held = path.join(dir, 'held')
+    const fd = fs.openSync(held, 'w')
+
+    try {
+      fs.writeFileSync(exe, `#!/bin/sh\nls -l /proc/$$/fd > "${report}.part"\nmv "${report}.part" "${report}"\n`, {
+        mode: 0o755
+      })
+      // Electron's main keeps such fds across exec; Node marks its own close-on-exec, so hand one down as fd 12.
+      const realSpawn = (await vi.importActual<typeof childProcess>('node:child_process')).spawn
+      vi.mocked(spawn).mockImplementationOnce((file, args, options) =>
+        realSpawn(file, args, { ...options, stdio: [...Array<'ignore'>(12).fill('ignore'), fd] })
+      )
+
+      relaunchNow({ releaseSingleInstanceLock: () => {} }, [], exe, {
+        PATH: process.env.PATH
+      })
+
+      await vi.waitFor(() => expect(fs.existsSync(report)).toBe(true), { timeout: 5000 })
+      expect(fs.readFileSync(report, 'utf8')).not.toContain(held)
+    } finally {
+      fs.closeSync(fd)
+      fs.rmSync(dir, { recursive: true, force: true })
+    }
+  })
 })

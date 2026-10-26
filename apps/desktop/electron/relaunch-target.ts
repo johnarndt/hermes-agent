@@ -77,39 +77,70 @@ export interface RelaunchHost {
   releaseSingleInstanceLock(): void
 }
 
+function executableError(file: string): string | null {
+  try {
+    fs.accessSync(file, fs.constants.X_OK)
+
+    return null
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code ?? String(error)
+  }
+}
+
+/**
+ * The shell that runs EXEC_WITH_STDIO_ONLY. dash (Debian/Ubuntu /bin/sh)
+ * cannot name fds above 9, and after `ready` Chromium holds dozens there, so
+ * bash closes them where it exists. `-p` keeps BASH_ENV, ENV and exported
+ * functions from running in it while still passing them to the image; bash
+ * rewrites an exported SHELLOPTS/BASHOPTS for its children, so an env that
+ * carries one keeps /bin/sh.
+ */
+function trampolineShell(env: NodeJS.ProcessEnv): { file: string; args: string[] } {
+  if (env.SHELLOPTS === undefined && env.BASHOPTS === undefined && !executableError('/bin/bash')) {
+    return { file: '/bin/bash', args: ['-p'] }
+  }
+
+  return { file: '/bin/sh', args: [] }
+}
+
 /**
  * Whether `target` can start this app again. A spawn failure is reported
- * asynchronously, after the caller has already exited, so the target is
- * checked up front and a refusal is logged now; the caller then keeps running
- * in place of the relaunch.
+ * asynchronously, after the caller has already exited, so the target and the
+ * shell that starts it are checked up front and a refusal is logged now with
+ * what the caller does instead.
  */
-export function canRelaunch(target: string): boolean {
-  try {
-    fs.accessSync(target, fs.constants.X_OK)
+export function canRelaunch(
+  target: string,
+  instead = 'continuing without the relaunch',
+  env: NodeJS.ProcessEnv = process.env
+): boolean {
+  for (const file of [target, trampolineShell(env).file]) {
+    const reason = executableError(file)
 
-    return true
-  } catch (error) {
-    const reason = (error as NodeJS.ErrnoException).code ?? String(error)
-    console.error(`[hermes] cannot start ${target} again (${reason}); continuing without the relaunch`)
+    if (reason) {
+      console.error(`[hermes] cannot start ${file} (${reason}); ${instead}`)
 
-    return false
+      return false
+    }
   }
+
+  return true
 }
 
 // libuv's spawn keeps every descriptor this process inherited without
 // O_CLOEXEC, which Chromium's launcher (app.relaunch) closes. Ours include the
 // AppImage runtime's keepalive pipe, whose last reader keeps this process's
 // FUSE mount and squashfuse daemon alive, and the launcher's ready pipe. The
-// child therefore goes through /bin/sh, which drops every fd above 2 and then
-// execs the image. POSIX only promises redirections on fds 0-9 and dash
-// exits on `exec 10<&-`, so higher numbers are closed where the shell takes
-// them (bash, busybox) and left in place under dash.
+// child therefore goes through a shell (trampolineShell), which drops every fd
+// above 2 and then execs the image. POSIX only promises redirections on fds
+// 0-9 and dash exits on `exec 10<&-`, so higher numbers are closed where the
+// shell takes them (bash, busybox) and left in place under dash.
 const EXEC_WITH_STDIO_ONLY = `big=
 (eval 'exec 10<&-') 2>/dev/null && big=1
 for f in /proc/self/fd/*; do
   n=\${f##*/}
   case $n in
-    0 | 1 | 2) continue ;;
+    0 | 1 | 2 | '' | *[!0-9]*) continue ;;
     [3-9]) ;;
     *) [ -n "$big" ] || continue ;;
   esac
@@ -174,8 +205,9 @@ export function relaunchNow(
   // outlives this process and that no AppRun re-enters: keep its environment.
   const appDir = env.APPDIR && posix.resolve(env.APPDIR)
   const childEnv = appDir && isInside(appDir, posix.resolve(target)) ? env : withoutMountEntries(env)
+  const shell = trampolineShell(env)
 
-  const child = spawn('/bin/sh', ['-c', EXEC_WITH_STDIO_ONLY, target, ...args], {
+  const child = spawn(shell.file, [...shell.args, '-c', EXEC_WITH_STDIO_ONLY, target, ...args], {
     detached: true,
     stdio: 'ignore',
     env: childEnv

@@ -50,14 +50,20 @@ export function createAppRelauncher(
   }
 
   let pendingArgs: string[] | null = null
+  // JS keeps running for a moment after app.exit(); a relaunch requested then would start a second child.
+  let exiting = false
 
   return {
     commandLine: app.commandLine,
     releaseSingleInstanceLock: () => app.releaseSingleInstanceLock(),
     relaunch: options => {
-      pendingArgs = options.args ?? process.argv.slice(1)
+      if (!exiting) {
+        pendingArgs = options.args ?? process.argv.slice(1)
+      }
     },
     exit: code => {
+      exiting = true
+
       if (pendingArgs) {
         // The new process skips `hermes desktop`: it needs the launcher's short socket TMPDIR,
         // not the long one main.ts restored after the lock (linux-sandbox-relaunch.ts).
@@ -65,7 +71,7 @@ export function createAppRelauncher(
         restoreLaunchTmpdir(childEnv)
         const target = relaunchTarget(execPath, env)
 
-        if (canRelaunch(target)) {
+        if (canRelaunch(target, 'relaunching through Electron instead', childEnv)) {
           relaunchNow(app, pendingArgs, target, childEnv)
         } else {
           // The backend is already down: Electron's relauncher is the last way back.
