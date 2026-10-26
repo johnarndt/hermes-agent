@@ -1,6 +1,8 @@
 import type { RelaunchOptions } from 'electron'
 
 import { LAUNCHER_READY_FD_ENV } from './linux-launcher-ready'
+import { restoreLaunchTmpdir } from './linux-sandbox-relaunch'
+import { relaunchNow, relaunchTarget } from './relaunch-target'
 
 interface RelaunchHost {
   relaunch(options: RelaunchOptions): void
@@ -15,4 +17,57 @@ interface RelaunchHost {
 export function relaunchApp(host: RelaunchHost, options: RelaunchOptions, env: NodeJS.ProcessEnv = process.env): void {
   delete env[LAUNCHER_READY_FD_ENV]
   host.relaunch(options)
+}
+
+export interface AppRelauncher {
+  commandLine: { hasSwitch(name: string): boolean }
+  relaunch(options: RelaunchOptions): void
+  releaseSingleInstanceLock(): void
+  exit(code: number): void
+}
+
+/**
+ * The `app` every relaunch site and the final exit go through.
+ *
+ * On Linux, Electron's relauncher starts the new process with
+ * PR_SET_NO_NEW_PRIVS, which every descendant inherits: the backend and the
+ * agent's terminal can no longer use sudo, pkexec or any setuid helper, and a
+ * FUSE-mounted AppImage cannot mount itself again. Linux therefore only
+ * records the relaunch, and `exit()` starts the target as an ordinary detached
+ * child right before exiting, after the backend is down and the
+ * single-instance lock is dropped, so the child neither races the old backend
+ * nor quits as a second instance. The target is the AppImage file for a
+ * mounted image (the mount dies with this process), otherwise this executable.
+ */
+export function createAppRelauncher(
+  app: AppRelauncher,
+  platform: NodeJS.Platform | string = process.platform,
+  execPath: string = process.execPath,
+  env: NodeJS.ProcessEnv = process.env
+): AppRelauncher {
+  if (platform !== 'linux') {
+    return app
+  }
+
+  let pendingArgs: string[] | null = null
+
+  return {
+    commandLine: app.commandLine,
+    releaseSingleInstanceLock: () => app.releaseSingleInstanceLock(),
+    relaunch: options => {
+      pendingArgs = options.args ?? process.argv.slice(1)
+    },
+    exit: code => {
+      if (pendingArgs) {
+        // The new process skips `hermes desktop`: it needs the launcher's short socket TMPDIR,
+        // not the long one main.ts restored after the lock (linux-sandbox-relaunch.ts).
+        const childEnv = { ...env }
+        restoreLaunchTmpdir(childEnv)
+        relaunchNow(app, pendingArgs, relaunchTarget(execPath, env), childEnv)
+        pendingArgs = null
+      }
+
+      app.exit(code)
+    }
+  }
 }
