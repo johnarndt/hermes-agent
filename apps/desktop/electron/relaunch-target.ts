@@ -95,12 +95,18 @@ function executableError(file: string): string | null {
  * rewrites an exported SHELLOPTS/BASHOPTS for its children, so an env that
  * carries one keeps /bin/sh.
  */
-function trampolineShell(env: NodeJS.ProcessEnv): { file: string; args: string[] } {
-  if (env.SHELLOPTS === undefined && env.BASHOPTS === undefined && !executableError('/bin/bash')) {
+function trampolineShell(env: NodeJS.ProcessEnv): { file: string; args: string[]; fallback?: string } {
+  const bashOptsExported = env.SHELLOPTS !== undefined || env.BASHOPTS !== undefined
+
+  if (!bashOptsExported && !executableError('/bin/bash')) {
     return { file: '/bin/bash', args: ['-p'] }
   }
 
-  return { file: '/bin/sh', args: [] }
+  return {
+    file: '/bin/sh',
+    args: [],
+    fallback: bashOptsExported ? 'SHELLOPTS/BASHOPTS exported' : '/bin/bash unavailable'
+  }
 }
 
 /**
@@ -206,6 +212,12 @@ export function relaunchNow(
   const appDir = env.APPDIR && posix.resolve(env.APPDIR)
   const childEnv = appDir && isInside(appDir, posix.resolve(target)) ? env : withoutMountEntries(env)
   const shell = trampolineShell(env)
+
+  if (shell.fallback) {
+    console.warn(
+      `[hermes] relaunching through /bin/sh (${shell.fallback}); file descriptors above 9 may stay open in the new process`
+    )
+  }
 
   const child = spawn(shell.file, [...shell.args, '-c', EXEC_WITH_STDIO_ONLY, target, ...args], {
     detached: true,
