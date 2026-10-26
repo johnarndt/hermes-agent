@@ -2,7 +2,7 @@ import type { RelaunchOptions } from 'electron'
 
 import { LAUNCHER_READY_FD_ENV } from './linux-launcher-ready'
 import { restoreLaunchTmpdir } from './linux-sandbox-relaunch'
-import { relaunchNow, relaunchTarget } from './relaunch-target'
+import { canRelaunch, relaunchNow, relaunchTarget } from './relaunch-target'
 
 interface RelaunchHost {
   relaunch(options: RelaunchOptions): void
@@ -63,7 +63,15 @@ export function createAppRelauncher(
         // not the long one main.ts restored after the lock (linux-sandbox-relaunch.ts).
         const childEnv = { ...env }
         restoreLaunchTmpdir(childEnv)
-        relaunchNow(app, pendingArgs, relaunchTarget(execPath, env), childEnv)
+        const target = relaunchTarget(execPath, env)
+
+        if (canRelaunch(target)) {
+          relaunchNow(app, pendingArgs, target, childEnv)
+        } else {
+          // The backend is already down: Electron's relauncher is the last way back.
+          app.relaunch({ args: pendingArgs })
+        }
+
         pendingArgs = null
       }
 
