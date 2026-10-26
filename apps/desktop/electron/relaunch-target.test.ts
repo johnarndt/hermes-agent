@@ -126,6 +126,25 @@ describe('spawnRelaunch', () => {
     }
   )
 
+  // --appimage-extract-and-run restarts the executable inside APPDIR, a plain
+  // directory no AppRun re-enters: dropping APPDIR there left ownAppImage blind
+  // and uninstall unable to find the image file.
+  it.skipIf(process.platform !== 'linux')('keeps APPDIR for an executable inside it', async () => {
+    const appDir = path.join(os.tmpdir(), 'appimage_extracted_0123abcd')
+    const env: NodeJS.ProcessEnv = { APPDIR: appDir, APPIMAGE: '/apps/Hermes.AppImage', PATH: `${appDir}/usr/bin:/bin` }
+    const realSpawn = (await vi.importActual<typeof childProcess>('node:child_process')).spawn
+    let childEnv: NodeJS.ProcessEnv | undefined
+    vi.mocked(spawn).mockImplementationOnce((_file, _args, options) => {
+      childEnv = (options as childProcess.SpawnOptions).env
+
+      return realSpawn('true', [], { stdio: 'pipe' })
+    })
+
+    spawnRelaunch(path.join(appDir, 'hermes'), [], env).stdin!.end()
+
+    expect(childEnv).toMatchObject(env)
+  })
+
   // After `ready` Chromium holds dozens of fds above 9 without O_CLOEXEC
   // (crashpad client socket, DevTools listener, caches); dash, Debian's
   // /bin/sh, cannot close them, and each relaunch carried the last one's.

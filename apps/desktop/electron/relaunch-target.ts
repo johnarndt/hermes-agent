@@ -42,7 +42,12 @@ export function ownAppImage(execPath: string, env: NodeJS.ProcessEnv): string | 
   const exe = posix.resolve(execPath)
 
   if (!appDir) {
-    return posix.dirname(exe).split('/').some(segment => segment.startsWith('.mount_')) ? appImage : undefined
+    return posix
+      .dirname(exe)
+      .split('/')
+      .some(segment => segment.startsWith('.mount_'))
+      ? appImage
+      : undefined
   }
 
   if (isInside(posix.resolve(appDir), exe)) {
@@ -217,11 +222,17 @@ export function spawnRelaunch(target: string, args: string[], env: NodeJS.Proces
     )
   }
 
+  // A relaunch of the executable inside APPDIR (--appimage-extract-and-run: a plain
+  // directory that outlives us) keeps APPDIR/APPIMAGE, which no AppRun restores and
+  // ownAppImage needs; only a restart of the image file drops the dying mount.
+  const appDir = env.APPDIR && posix.resolve(env.APPDIR)
+  const childEnv = appDir && isInside(appDir, posix.resolve(target)) ? env : withoutMountEntries(env)
+
   // This pid, not the shell's $PPID: if this process dies before the shell starts, $PPID is already the new parent.
   const child = spawn(shell.file, [...shell.args, '-c', `pp=${process.pid}\n${EXEC_AFTER_EXIT}`, target, ...args], {
     detached: true,
     stdio: ['pipe', 'ignore', 'ignore'],
-    env: withoutMountEntries(env)
+    env: childEnv
   })
 
   child.on('error', error => console.error(`[hermes] relaunching ${target} failed: ${error.message}`))
