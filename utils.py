@@ -1,6 +1,7 @@
 """Shared utility functions for hermes-agent."""
 
 import errno
+import hashlib
 import json
 import logging
 import os
@@ -58,6 +59,17 @@ RACY_MTIME_WINDOW_NS = 2_000_000_000
 def mtime_is_racy(mtime_ns: int) -> bool:
     """True while ``mtime_ns`` is too recent to rule out a same-tick write after the stat."""
     return time.time_ns() - mtime_ns < RACY_MTIME_WINDOW_NS
+
+
+def racy_content_digest(path: str | Path, mtime_ns: int) -> str:
+    """``""`` once ``mtime_ns`` has settled; while it is racy, a digest of the file's bytes. A cache
+    keyed on a stat signature appends it, because two same-size in-place writes in one timestamp tick
+    share mtime, ctime, size and inode (kernels without multigrain timestamps). Read before the parse
+    it guards: a write in between then costs one re-parse instead of pinning the older content."""
+    if not mtime_is_racy(mtime_ns):
+        return ""
+    with open(path, "rb") as f:
+        return hashlib.blake2b(f.read(), digest_size=16).hexdigest()
 
 
 def _preserve_file_mode(path: Path) -> int | None:
@@ -640,7 +652,8 @@ def load_yaml_file_readonly(path: str | Path) -> Any:
     Returns the cached object itself — callers must never mutate it. Parse errors propagate and
     are not cached; a missing file raises ``FileNotFoundError`` like ``open`` does."""
     path = Path(path)
-    sig = file_signature(path.stat())
+    st = path.stat()
+    sig = (*file_signature(st), racy_content_digest(path, st.st_mtime_ns))
     key = str(path)
     with _YAML_FILE_CACHE_LOCK:
         cached = _YAML_FILE_CACHE.get(key)

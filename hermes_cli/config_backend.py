@@ -54,7 +54,11 @@ class ConfigBackend(Protocol):
         ...
 
     def version(self, home: Path) -> tuple[Any, ...]:
-        """Cheap cache signature; changes whenever the user layer does."""
+        """Cheap change signature; changes whenever the user layer does."""
+        ...
+
+    def cache_version(self, home: Path) -> tuple[Any, ...]:
+        """``version`` plus whatever a cache needs to tell apart writes ``version`` cannot see."""
         ...
 
     def exists(self, home: Path) -> bool: ...
@@ -78,6 +82,12 @@ class FileBackend:
         st = path.stat()  # before the import: a missing file must not need the utils stack (PM runtime)
         from utils import file_signature
         return file_signature(st)
+
+    @classmethod
+    def cache_version_path(cls, path: Path) -> tuple[Any, ...]:
+        version = cls.version_path(path)
+        from utils import racy_content_digest
+        return (*version, racy_content_digest(path, version[0]))  # version[0] is st_mtime_ns
 
     @staticmethod
     def read_path(path: Path) -> Any:
@@ -111,6 +121,11 @@ class FileBackend:
 
     def version(self, home: Path) -> tuple[int, int, int, int]:
         return self.version_path(self.config_path(home))
+
+    def cache_version(self, home: Path) -> tuple[Any, ...]:
+        version = self.version(home)
+        from utils import racy_content_digest
+        return (*version, racy_content_digest(self.config_path(home), version[0]))
 
     def exists(self, home: Path) -> bool:
         return self.config_path(home).exists()
@@ -171,6 +186,18 @@ def config_version(config_path: PathLike) -> tuple[Any, ...]:
     """Cache signature of a config file; raises ``FileNotFoundError`` / ``OSError`` like ``stat``."""
     backend, home = _route(config_path)
     return backend.version(home)
+
+
+def config_cache_version(config_path: PathLike) -> tuple[Any, ...]:
+    """Signature for a cache of a config file's parse: :func:`config_version` can stay equal across a
+    same-tick same-size rewrite, which would pin the older parse for the process lifetime."""
+    backend, home = _route(config_path)
+    return backend.cache_version(home)
+
+
+def file_cache_version(path: PathLike) -> tuple[Any, ...]:
+    """:func:`config_cache_version` of a file that is not a home's user layer (the managed overlay)."""
+    return FileBackend.cache_version_path(Path(path))
 
 
 def config_version_or_none(config_path: PathLike) -> Optional[tuple[Any, ...]]:
