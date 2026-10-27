@@ -50,19 +50,16 @@ export function ownAppImage(execPath: string, env: NodeJS.ProcessEnv): string | 
       : undefined
   }
 
-  return isInsideAppDir(appDir, exe) ? appImage : undefined
-}
+  if (isInside(posix.resolve(appDir), exe)) {
+    return appImage
+  }
 
-/**
- * `file` lies inside `appDir`, as written or with symlinks resolved: the
- * runtime builds APPDIR from the raw $TMPDIR, while process.execPath has its
- * symlinks resolved (TMPDIR=~/tmp on Fedora Atomic, /home -> /var/home).
- */
-function isInsideAppDir(appDir: string, file: string): boolean {
-  const dir = posix.resolve(appDir)
-  const exe = posix.resolve(file)
+  // The runtime builds APPDIR from the raw $TMPDIR, while process.execPath has
+  // its symlinks resolved: TMPDIR=~/tmp on Fedora Atomic (/home -> /var/home).
+  const realAppDir = realpathOrNull(appDir)
+  const realExe = realpathOrNull(exe)
 
-  return isInside(dir, exe) || isInside(realpathOrNull(dir) ?? dir, realpathOrNull(exe) ?? exe)
+  return realAppDir && realExe && isInside(realAppDir, realExe) ? appImage : undefined
 }
 
 /**
@@ -225,10 +222,13 @@ export function spawnRelaunch(target: string, args: string[], env: NodeJS.Proces
     )
   }
 
-  // A relaunch of the executable inside APPDIR (--appimage-extract-and-run: a plain
-  // directory that outlives us) keeps APPDIR/APPIMAGE, which no AppRun restores and
-  // ownAppImage needs; only a restart of the image file drops the dying mount.
-  const childEnv = env.APPDIR && isInsideAppDir(env.APPDIR, target) ? env : withoutMountEntries(env)
+  // Only a restart of our own image file (relaunchTarget returns it only when
+  // ownAppImage claims it) drops the dying mount. Any other target keeps the env
+  // whole: the executable inside an extracted APPDIR (a plain directory, maybe
+  // reached through a symlinked $TMPDIR) needs APPDIR/APPIMAGE, which no AppRun
+  // restores, and another app's AppImage env is the user's, as app.relaunch kept it.
+  const ownImage = env.APPIMAGE && posix.resolve(target) === posix.resolve(env.APPIMAGE)
+  const childEnv = ownImage ? withoutMountEntries(env) : env
 
   // This pid, not the shell's $PPID: if this process dies before the shell starts, $PPID is already the new parent.
   const child = spawn(shell.file, [...shell.args, '-c', `pp=${process.pid}\n${EXEC_AFTER_EXIT}`, target, ...args], {

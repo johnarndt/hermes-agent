@@ -185,6 +185,32 @@ describe('spawnRelaunch', () => {
     }
   )
 
+  // Started from another app's AppImage (an AppImage terminal), Hermes inherits
+  // that app's APPDIR/APPIMAGE and its mount on PATH and EDITOR; app.relaunch
+  // kept them, so a restart must not strip half of that env.
+  it.skipIf(process.platform !== 'linux')("keeps another app's AppImage env intact", async () => {
+    const mount = path.join(os.tmpdir(), '.mount_TermAbC123')
+
+    const env: NodeJS.ProcessEnv = {
+      APPDIR: mount,
+      APPIMAGE: '/apps/Terminal.AppImage',
+      EDITOR: `${mount}/usr/bin/nvim`,
+      PATH: `${mount}/usr/bin:/bin`
+    }
+
+    const realSpawn = (await vi.importActual<typeof childProcess>('node:child_process')).spawn
+    let childEnv: NodeJS.ProcessEnv | undefined
+    vi.mocked(spawn).mockImplementationOnce((_file, _args, options) => {
+      childEnv = (options as childProcess.SpawnOptions).env
+
+      return realSpawn('true', [], { stdio: 'pipe' })
+    })
+
+    spawnRelaunch('/opt/Hermes/hermes', [], env).stdin!.end()
+
+    expect(childEnv).toEqual(env)
+  })
+
   // After `ready` Chromium holds dozens of fds above 9 without O_CLOEXEC
   // (crashpad client socket, DevTools listener, caches); dash, Debian's
   // /bin/sh, cannot close them, and each relaunch carried the last one's.
