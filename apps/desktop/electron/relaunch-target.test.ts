@@ -159,11 +159,13 @@ describe('spawnRelaunch', () => {
         fs.symlinkSync(path.join(root, 'var-home'), path.join(root, 'home'))
         const appDir = path.join(root, 'home', 'appimage_extracted_0123abcd')
         const exe = fs.realpathSync(path.join(realDir, 'hermes'))
+
         const env: NodeJS.ProcessEnv = {
           APPDIR: appDir,
           APPIMAGE: '/apps/Hermes.AppImage',
           PATH: `${appDir}/usr/bin:/bin`
         }
+
         const realSpawn = (await vi.importActual<typeof childProcess>('node:child_process')).spawn
         let childEnv: NodeJS.ProcessEnv | undefined
         vi.mocked(spawn).mockImplementationOnce((_file, _args, options) => {
