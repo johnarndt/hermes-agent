@@ -50,16 +50,19 @@ export function ownAppImage(execPath: string, env: NodeJS.ProcessEnv): string | 
       : undefined
   }
 
-  if (isInside(posix.resolve(appDir), exe)) {
-    return appImage
-  }
+  return isInsideAppDir(appDir, exe) ? appImage : undefined
+}
 
-  // The runtime builds APPDIR from the raw $TMPDIR, while process.execPath has
-  // its symlinks resolved: TMPDIR=~/tmp on Fedora Atomic (/home -> /var/home).
-  const realAppDir = realpathOrNull(appDir)
-  const realExe = realpathOrNull(exe)
+/**
+ * `file` lies inside `appDir`, as written or with symlinks resolved: the
+ * runtime builds APPDIR from the raw $TMPDIR, while process.execPath has its
+ * symlinks resolved (TMPDIR=~/tmp on Fedora Atomic, /home -> /var/home).
+ */
+function isInsideAppDir(appDir: string, file: string): boolean {
+  const dir = posix.resolve(appDir)
+  const exe = posix.resolve(file)
 
-  return realAppDir && realExe && isInside(realAppDir, realExe) ? appImage : undefined
+  return isInside(dir, exe) || isInside(realpathOrNull(dir) ?? dir, realpathOrNull(exe) ?? exe)
 }
 
 /**
@@ -225,8 +228,7 @@ export function spawnRelaunch(target: string, args: string[], env: NodeJS.Proces
   // A relaunch of the executable inside APPDIR (--appimage-extract-and-run: a plain
   // directory that outlives us) keeps APPDIR/APPIMAGE, which no AppRun restores and
   // ownAppImage needs; only a restart of the image file drops the dying mount.
-  const appDir = env.APPDIR && posix.resolve(env.APPDIR)
-  const childEnv = appDir && isInside(appDir, posix.resolve(target)) ? env : withoutMountEntries(env)
+  const childEnv = env.APPDIR && isInsideAppDir(env.APPDIR, target) ? env : withoutMountEntries(env)
 
   // This pid, not the shell's $PPID: if this process dies before the shell starts, $PPID is already the new parent.
   const child = spawn(shell.file, [...shell.args, '-c', `pp=${process.pid}\n${EXEC_AFTER_EXIT}`, target, ...args], {

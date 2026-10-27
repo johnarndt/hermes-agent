@@ -145,6 +145,44 @@ describe('spawnRelaunch', () => {
     expect(childEnv).toMatchObject(env)
   })
 
+  // APPDIR keeps the raw $TMPDIR (a symlink on Fedora Atomic, /home -> /var/home)
+  // while process.execPath is resolved: the containment check must agree with ownAppImage.
+  it.skipIf(process.platform !== 'linux')(
+    'keeps APPDIR when the extracted dir is reached through a symlink',
+    async () => {
+      const root = fs.mkdtempSync(path.join(os.tmpdir(), 'hermes-extracted-link-'))
+
+      try {
+        const realDir = path.join(root, 'var-home', 'appimage_extracted_0123abcd')
+        fs.mkdirSync(realDir, { recursive: true })
+        fs.writeFileSync(path.join(realDir, 'hermes'), '')
+        fs.symlinkSync(path.join(root, 'var-home'), path.join(root, 'home'))
+        const appDir = path.join(root, 'home', 'appimage_extracted_0123abcd')
+        const exe = fs.realpathSync(path.join(realDir, 'hermes'))
+        const env: NodeJS.ProcessEnv = {
+          APPDIR: appDir,
+          APPIMAGE: '/apps/Hermes.AppImage',
+          PATH: `${appDir}/usr/bin:/bin`
+        }
+        const realSpawn = (await vi.importActual<typeof childProcess>('node:child_process')).spawn
+        let childEnv: NodeJS.ProcessEnv | undefined
+        vi.mocked(spawn).mockImplementationOnce((_file, _args, options) => {
+          childEnv = (options as childProcess.SpawnOptions).env
+
+          return realSpawn('true', [], { stdio: 'pipe' })
+        })
+
+        expect(ownAppImage(exe, env)).toBe('/apps/Hermes.AppImage')
+        spawnRelaunch(exe, [], env).stdin!.end()
+
+        expect(childEnv).toMatchObject(env)
+        expect(ownAppImage(exe, childEnv!)).toBe('/apps/Hermes.AppImage')
+      } finally {
+        fs.rmSync(root, { recursive: true, force: true })
+      }
+    }
+  )
+
   // After `ready` Chromium holds dozens of fds above 9 without O_CLOEXEC
   // (crashpad client socket, DevTools listener, caches); dash, Debian's
   // /bin/sh, cannot close them, and each relaunch carried the last one's.
